@@ -50,7 +50,7 @@ async def web_login(request: Request):
 
     state_data = {
         "csrf_token": secrets.token_urlsafe(16),
-        "port": "5174",  # Default to dev server port
+        "port": None,
         "client_type": "web",
     }
 
@@ -126,36 +126,22 @@ async def auth_callback(
     session_jwt = security.create_session_token(data={"sub": str(user.id)})
 
     callback_port = state_data.get("port")
-    client_type = state_data.get("client_type", "web")  # Default to web
+    client_type = state_data.get("client_type", "web")
 
     if callback_port:
         if client_type == "desktop":
-            # Для desktop приложений отправляем callback на локальный порт приложения
+            # Desktop app - redirect to local HTTP server
             callback_url = f"http://localhost:{callback_port}/?jwt_token={session_jwt}&user_id={osu_user_id}&username={username}"
-            response = RedirectResponse(url=callback_url)
         elif client_type == "web":
-            # Для web OAuth делаем redirect обратно на главную страницу (пользователь уже аутентифицирован через cookie)
-            if callback_port == "5174":  # Lost Scores Site dev server
-                callback_url = "http://localhost:5174/"
-            elif callback_port == "443":  # Production HTTPS (lost.lemon4ik.kz)
-                callback_url = "https://lost.lemon4ik.kz/"
-            else:
-                # Fallback для других портов
-                callback_url = f"http://localhost:{callback_port}/"
-            response = RedirectResponse(url=callback_url)
+            # Web client - redirect to frontend base URL
+            callback_url = settings.FRONTEND_BASE_URL
         else:
-            # Legacy: определяем тип клиента по порту
-            if callback_port == "5174" or callback_port == "443":
-                # Веб клиент - редирект на главную
-                if callback_port == "5174":
-                    callback_url = "http://localhost:5174/"
-                else:
-                    callback_url = "https://lost.lemon4ik.kz/"
-            else:
-                # Desktop клиент - показываем success страницу
-                callback_url = f"http://localhost:5174/oauth/success?username={username}&user_id={osu_user_id}&source=desktop"
-            response = RedirectResponse(url=callback_url)
+            # Unknown client type - show success page on frontend
+            callback_url = f"{settings.FRONTEND_BASE_URL}/oauth/success?username={username}&user_id={osu_user_id}&source=desktop"
+
+        response = RedirectResponse(url=callback_url)
     else:
+        # No callback_port - return JSON (API mode)
         response = JSONResponse(
             content=SessionToken(
                 session_token=session_jwt, token_type="bearer"

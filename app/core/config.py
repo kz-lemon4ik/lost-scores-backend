@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 43200
     DATABASE_URL: str = ""
     HMAC_SECRET_KEY: str = ""
+    FRONTEND_BASE_URL: str = "http://localhost:5174"
 
     class Config:
         case_sensitive = True

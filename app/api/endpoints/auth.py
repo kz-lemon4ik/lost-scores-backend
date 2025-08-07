@@ -2,7 +2,7 @@ import secrets
 import base64
 import json
 from fastapi import Request, APIRouter, Depends, HTTPException
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from sqlalchemy.orm import Session
 import httpx
 
@@ -33,8 +33,6 @@ async def login(
     state_str = json.dumps(state_data)
     state_b64 = base64.urlsafe_b64encode(state_str.encode()).decode()
 
-    request.session["oauth_csrf"] = state_data["csrf_token"]
-
     authorization_url = (
         f"https://osu.ppy.sh/oauth/authorize?client_id={settings.OSU_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}&response_type=code&scope=public"
@@ -57,8 +55,6 @@ async def web_login(request: Request):
     state_str = json.dumps(state_data)
     state_b64 = base64.urlsafe_b64encode(state_str.encode()).decode()
 
-    request.session["oauth_csrf"] = state_data["csrf_token"]
-
     authorization_url = (
         f"https://osu.ppy.sh/oauth/authorize?client_id={settings.OSU_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}&response_type=code&scope=public"
@@ -71,19 +67,14 @@ async def web_login(request: Request):
 async def auth_callback(
     code: str, state: str, request: Request, db: Session = Depends(deps.get_db)
 ):
-    if "oauth_csrf" not in request.session:
-        raise HTTPException(
-            status_code=403, detail="OAuth CSRF token missing from session."
-        )
-
     try:
         state_json = base64.urlsafe_b64decode(state).decode()
         state_data = json.loads(state_json)
     except (ValueError, TypeError, json.JSONDecodeError):
         raise HTTPException(status_code=400, detail="Invalid state parameter.")
 
-    if request.session.pop("oauth_csrf") != state_data.get("csrf_token"):
-        raise HTTPException(status_code=403, detail="OAuth CSRF token mismatch.")
+    if not state_data.get("csrf_token"):
+        raise HTTPException(status_code=403, detail="OAuth CSRF token missing.")
 
     token_url = f"{OSU_API_BASE_URL}/oauth/token"
     token_data = {
@@ -128,31 +119,17 @@ async def auth_callback(
     callback_port = state_data.get("port")
     client_type = state_data.get("client_type", "web")
 
-    if callback_port:
-        if client_type == "desktop":
-            # Desktop app - redirect to local HTTP server
-            callback_url = f"http://localhost:{callback_port}/?jwt_token={session_jwt}&user_id={osu_user_id}&username={username}"
-        elif client_type == "web":
-            # Web client - redirect to frontend base URL
-            callback_url = settings.FRONTEND_BASE_URL
-        else:
-            # Unknown client type - show success page on frontend
-            callback_url = f"{settings.FRONTEND_BASE_URL}/oauth/success?username={username}&user_id={osu_user_id}&source=desktop"
-
+    if client_type == "desktop" and callback_port:
+        callback_url = f"http://localhost:{callback_port}/?jwt_token={session_jwt}&user_id={osu_user_id}&username={username}"
+        response = RedirectResponse(url=callback_url)
+    elif client_type == "web":
+        callback_url = f"{settings.FRONTEND_BASE_URL}/oauth/success?jwt_token={session_jwt}&username={username}&user_id={osu_user_id}"
         response = RedirectResponse(url=callback_url)
     else:
-        # No callback_port - return JSON (API mode)
         response = JSONResponse(
             content=SessionToken(
                 session_token=session_jwt, token_type="bearer"
             ).model_dump()
         )
 
-    response.set_cookie(
-        key=settings.SESSION_COOKIE_NAME,
-        value=session_jwt,
-        httponly=True,
-        max_age=settings.SESSION_COOKIE_EXPIRE_SECONDS,
-        samesite="lax",
-    )
     return response

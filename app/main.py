@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.api import api_router
 from app.db.base import Base
@@ -16,19 +15,15 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
-# Add session middleware
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=settings.SECRET_KEY,
-)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173",  # welcome-site dev
-        "http://localhost:5174",  # lost-scores-site dev
-        "https://lemon4ik.kz",  # welcome-site prod
-        "https://lost.lemon4ik.kz",  # lost-scores-site prod
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "https://lemon4ik.kz",
+        "https://lost.lemon4ik.kz",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST"],

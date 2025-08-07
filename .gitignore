@@ -53,7 +53,7 @@ venv.bak
 *.db
 *.db-journal
 
-storage/
+storage/*
 
 log/
 logs/

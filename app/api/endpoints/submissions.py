@@ -26,6 +26,7 @@ class SubmissionSummary(BaseModel):
 class LostScore(BaseModel):
     pp: float
     beatmap_id: int
+    beatmapset_id: int | None = None
     artist: str
     title: str
     creator: str
@@ -117,10 +118,46 @@ async def get_submission(username: str, offset: int = 0, limit: int = 50):
                 total_count = len(sorted_scores)
                 paginated_scores = sorted_scores[offset:offset + limit]
 
-                lost_scores = [
-                    LostScore(
+                async def get_beatmap_info(beatmap_id: int):
+                    try:
+                        response = await get_public_user_data(str(beatmap_id), mode="osu")
+                        return response.get("beatmapset_id")
+                    except Exception:
+                        return None
+
+                import asyncio
+                from app.core.osu_api_client import get_client_credentials_token
+                import httpx
+
+                async def fetch_beatmapset_id(beatmap_id: int, token: str) -> int | None:
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            headers = {"Authorization": f"Bearer {token}"}
+                            response = await client.get(
+                                f"https://osu.ppy.sh/api/v2/beatmaps/{beatmap_id}",
+                                headers=headers,
+                                timeout=5.0
+                            )
+                            if response.status_code == 200:
+                                beatmap_data = response.json()
+                                return beatmap_data.get("beatmapset_id")
+                    except Exception as e:
+                        logger.error(f"Failed to fetch beatmapset_id for {beatmap_id}: {e}")
+                    return None
+
+                token = await get_client_credentials_token()
+                beatmapset_tasks = [
+                    fetch_beatmapset_id(score['beatmap_id'], token)
+                    for score in paginated_scores
+                ]
+                beatmapset_ids = await asyncio.gather(*beatmapset_tasks)
+
+                lost_scores = []
+                for score, beatmapset_id in zip(paginated_scores, beatmapset_ids):
+                    lost_scores.append(LostScore(
                         pp=score["pp"],
                         beatmap_id=score["beatmap_id"],
+                        beatmapset_id=beatmapset_id,
                         artist=score["artist"],
                         title=score["title"],
                         creator=score["creator"],
@@ -132,9 +169,7 @@ async def get_submission(username: str, offset: int = 0, limit: int = 50):
                         countMiss=score["countMiss"],
                         rank=score["rank"],
                         score_time=score["score_time"]
-                    )
-                    for score in paginated_scores
-                ]
+                    ))
 
                 current_user_stats = None
                 try:

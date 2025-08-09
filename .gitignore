@@ -54,6 +54,11 @@ venv.bak
 *.db-journal
 
 storage/*
+!storage/submissions/
+storage/submissions/*
+!storage/submissions/*/
+storage/submissions/*/*
+!storage/submissions/*/analysis_results.json
 
 log/
 logs/

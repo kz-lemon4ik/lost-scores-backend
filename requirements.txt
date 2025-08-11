@@ -11,3 +11,4 @@ pydantic
 pydantic-settings
 itsdangerous
 starlette
+pytest

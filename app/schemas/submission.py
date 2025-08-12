@@ -1,22 +1,37 @@
+from datetime import datetime
 from pydantic import BaseModel, ConfigDict
-import datetime
 
 
 class SubmissionBase(BaseModel):
-    total_pp_gain: float
-    lost_scores_count: int
+    username: str
+    scan_timestamp: datetime
+    lost_count: int
+    current_pp: float
+    potential_pp: float
+    delta_pp: float
+    thin_json_path: str
 
 
 class SubmissionCreate(SubmissionBase):
-    report_path: str
+    pass
 
 
 class Submission(SubmissionBase):
     id: int
     user_id: int
-    submission_date: datetime.datetime
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SubmissionSummary(BaseModel):
+    username: str
+    user_id: int
+    scan_date: datetime
+    lost_scores_count: int
+    total_pp_gain: float
+    current_pp: float
+    potential_pp: float
 
 
 class SubmissionLeaderboard(BaseModel):
@@ -25,4 +40,4 @@ class SubmissionLeaderboard(BaseModel):
     osu_user_id: int
     total_pp_gain: float
     lost_scores_count: int
-    submission_date: datetime.datetime
+    submission_date: datetime

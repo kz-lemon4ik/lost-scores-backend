@@ -1,16 +1,21 @@
-from fastapi import APIRouter, HTTPException
-from pathlib import Path
 import json
 import logging
+from pathlib import Path
 from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
+
+from app.api.deps import get_db
 from app.core.osu_api_client import get_public_user_data
+from app.crud import crud_submission, crud_beatmap
+from app.models.submission import Submission as SubmissionModel
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
-STORAGE_DIR = Path(__file__).parent.parent.parent.parent / "storage" / "submissions"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class SubmissionSummary(BaseModel):
@@ -58,177 +63,145 @@ class SubmissionDetail(BaseModel):
 
 
 @router.get("/list", response_model=list[SubmissionSummary])
-async def list_submissions():
-    submissions = []
+async def list_submissions(limit: int = 100, db: Session = Depends(get_db)):
+    db_submissions = crud_submission.get_recent_submissions(db, limit=limit)
 
-    if not STORAGE_DIR.exists():
-        return submissions
-
-    for submission_dir in STORAGE_DIR.iterdir():
-        if not submission_dir.is_dir():
-            continue
-
-        analysis_file = submission_dir / "analysis_results.json"
-        if not analysis_file.exists():
-            continue
-
-        try:
-            with open(analysis_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            submissions.append(SubmissionSummary(
-                username=data["metadata"]["user_identifier"],
-                user_id=0,
-                scan_date=data["metadata"]["analysis_timestamp"],
-                lost_scores_count=data["summary_stats"]["lost_scores_found"],
-                total_pp_gain=data["summary_stats"]["delta_pp"],
-                current_pp=data["summary_stats"]["current_pp"],
-                potential_pp=data["summary_stats"]["potential_pp"]
-            ))
-        except Exception as e:
-            continue
-
-    return submissions
+    return [_summary_from_db(sub) for sub in db_submissions]
 
 
-@router.get("/{username}", response_model=Optional[SubmissionDetail])
-async def get_submission(username: str, offset: int = 0, limit: int = 50):
-    if not STORAGE_DIR.exists():
+@router.get("/{username}", response_model=SubmissionDetail)
+async def get_submission(username: str, offset: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+    db_submission = crud_submission.get_latest_submission_by_username(db, username)
+
+    if not db_submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    for submission_dir in STORAGE_DIR.iterdir():
-        if not submission_dir.is_dir():
-            continue
-
-        analysis_file = submission_dir / "analysis_results.json"
-        if not analysis_file.exists():
-            continue
-
-        try:
-            with open(analysis_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if data["metadata"]["user_identifier"].lower() == username.lower():
-                sorted_scores = sorted(
-                    data["lost_scores"],
-                    key=lambda x: x["pp"],
-                    reverse=True
-                )
-
-                total_count = len(sorted_scores)
-                paginated_scores = sorted_scores[offset:offset + limit]
-
-                async def get_beatmap_info(beatmap_id: int):
-                    try:
-                        response = await get_public_user_data(str(beatmap_id), mode="osu")
-                        return response.get("beatmapset_id")
-                    except Exception:
-                        return None
-
-                import asyncio
-                from app.core.osu_api_client import get_client_credentials_token
-                import httpx
-
-                async def fetch_beatmapset_id(beatmap_id: int, token: str) -> int | None:
-                    try:
-                        async with httpx.AsyncClient() as client:
-                            headers = {"Authorization": f"Bearer {token}"}
-                            response = await client.get(
-                                f"https://osu.ppy.sh/api/v2/beatmaps/{beatmap_id}",
-                                headers=headers,
-                                timeout=5.0
-                            )
-                            if response.status_code == 200:
-                                beatmap_data = response.json()
-                                return beatmap_data.get("beatmapset_id")
-                    except Exception as e:
-                        logger.error(f"Failed to fetch beatmapset_id for {beatmap_id}: {e}")
-                    return None
-
-                token = await get_client_credentials_token()
-                beatmapset_tasks = [
-                    fetch_beatmapset_id(score['beatmap_id'], token)
-                    for score in paginated_scores
-                ]
-                beatmapset_ids = await asyncio.gather(*beatmapset_tasks)
-
-                lost_scores = []
-                for score, beatmapset_id in zip(paginated_scores, beatmapset_ids):
-                    lost_scores.append(LostScore(
-                        pp=score["pp"],
-                        beatmap_id=score["beatmap_id"],
-                        beatmapset_id=beatmapset_id,
-                        artist=score["artist"],
-                        title=score["title"],
-                        creator=score["creator"],
-                        version=score["version"],
-                        mods=score["mods"],
-                        accuracy=score["accuracy"],
-                        count100=score["count100"],
-                        count50=score["count50"],
-                        countMiss=score["countMiss"],
-                        rank=score["rank"],
-                        score_time=score["score_time"]
-                    ))
-
-                current_user_stats = None
-                try:
-                    user_data = await get_public_user_data(username, mode="osu")
-                    current_user_stats = CurrentUserStats(
-                        current_pp=user_data["statistics"]["pp"],
-                        current_global_rank=user_data["statistics"]["global_rank"],
-                        current_country_rank=user_data["statistics"]["country_rank"],
-                        username=user_data["username"],
-                        avatar_url=user_data["avatar_url"],
-                        country_code=user_data["country_code"]
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to fetch current user data: {e}")
-
-                return SubmissionDetail(
-                    metadata=data["metadata"],
-                    summary_stats=data["summary_stats"],
-                    lost_scores=lost_scores,
-                    current_user_stats=current_user_stats,
-                    total_count=total_count
-                )
-        except Exception as e:
-            continue
-
-    raise HTTPException(status_code=404, detail="Submission not found")
+    return await _detail_from_db(db_submission, db, offset=offset, limit=limit)
 
 
-@router.get("/{username}/image/{image_type}")
-async def get_submission_image(username: str, image_type: str):
-    from fastapi.responses import FileResponse
+def _summary_from_db(submission: SubmissionModel) -> SubmissionSummary:
+    osu_user_id = submission.user.osu_user_id if submission.user else submission.user_id
+    return SubmissionSummary(
+        username=submission.username,
+        user_id=osu_user_id,
+        scan_date=submission.scan_timestamp.isoformat(),
+        lost_scores_count=submission.lost_count,
+        total_pp_gain=submission.delta_pp,
+        current_pp=submission.current_pp,
+        potential_pp=submission.potential_pp,
+    )
 
-    if image_type not in ["lost_scores_result", "potential_top_result", "summary_badge"]:
-        raise HTTPException(status_code=400, detail="Invalid image type")
 
-    if not STORAGE_DIR.exists():
-        raise HTTPException(status_code=404, detail="Submission not found")
+async def _detail_from_db(
+    submission: SubmissionModel,
+    db: Session,
+    offset: int,
+    limit: int,
+) -> SubmissionDetail:
+    json_path = _resolve_path(submission.thin_json_path)
 
-    for submission_dir in STORAGE_DIR.iterdir():
-        if not submission_dir.is_dir():
-            continue
+    if not json_path.exists():
+        logger.warning("Submission file not found at %s", json_path)
+        raise HTTPException(status_code=404, detail="Submission data not found")
 
-        analysis_file = submission_dir / "analysis_results.json"
-        if not analysis_file.exists():
-            continue
+    metadata, summary, raw_scores = _load_submission_file(json_path)
+    total_count = len(raw_scores)
+    paginated_scores = raw_scores[offset: offset + limit]
 
-        try:
-            with open(analysis_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+    beatmap_lookup = {}
+    beatmap_ids = [score.get("beatmap_id") for score in paginated_scores if score.get("beatmap_id")]
+    if beatmap_ids:
+        beatmap_lookup = crud_beatmap.get_beatmaps_by_ids(db, beatmap_ids)
 
-            if data["metadata"]["user_identifier"].lower() == username.lower():
-                image_file = submission_dir / f"{image_type}.png"
-                if image_file.exists():
-                    return FileResponse(
-                        image_file,
-                        media_type="image/png",
-                        headers={"Cache-Control": "public, max-age=3600"}
-                    )
-        except Exception:
-            continue
+    lost_scores: list[LostScore] = []
+    for score in paginated_scores:
+        beatmap_id = score.get("beatmap_id")
+        beatmapset_id = score.get("beatmapset_id")
+        if beatmapset_id is None and beatmap_id in beatmap_lookup:
+            beatmapset_id = beatmap_lookup[beatmap_id].beatmapset_id
 
-    raise HTTPException(status_code=404, detail="Image not found")
+        lost_scores.append(
+            LostScore(
+                pp=float(score.get("pp", 0.0)),
+                beatmap_id=beatmap_id,
+                beatmapset_id=beatmapset_id,
+                artist=score.get("artist", ""),
+                title=score.get("title", ""),
+                creator=score.get("creator", ""),
+                version=score.get("version", ""),
+                mods=score.get("mods", []),
+                accuracy=float(score.get("accuracy", 0.0)),
+                count100=int(score.get("count100", 0)),
+                count50=int(score.get("count50", 0)),
+                countMiss=int(score.get("countMiss", 0)),
+                rank=score.get("rank", ""),
+                score_time=score.get("score_time", ""),
+            )
+        )
+
+    summary_stats = _merge_summary(summary, submission)
+    metadata = metadata or {}
+    metadata.setdefault("username", submission.username)
+    metadata.setdefault("user_id", submission.user.osu_user_id if submission.user else submission.user_id)
+    metadata.setdefault("analysis_timestamp", submission.scan_timestamp.isoformat())
+
+    current_user_stats = await _fetch_user_stats(submission)
+
+    return SubmissionDetail(
+        metadata=metadata,
+        summary_stats=summary_stats,
+        lost_scores=lost_scores,
+        current_user_stats=current_user_stats,
+        total_count=total_count,
+    )
+
+
+
+def _resolve_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = (REPO_ROOT / path).resolve()
+    return path
+
+
+def _load_submission_file(path: Path) -> tuple[dict, dict, list[dict]]:
+    with open(path, "r", encoding="utf-8") as fp:
+        data = json.load(fp)
+
+    metadata = data.get("metadata", {})
+    summary = data.get("summary_stats") or data.get("summary", {})
+
+    if "score_lists" in data:
+        lost_scores = data["score_lists"].get("lost_scores", [])
+    else:
+        lost_scores = data.get("lost_scores", [])
+
+    return metadata, summary, lost_scores
+
+
+def _merge_summary(summary: dict, submission: SubmissionModel) -> dict:
+    summary_stats = dict(summary or {})
+
+    summary_stats.setdefault("lost_scores_found", submission.lost_count)
+    summary_stats.setdefault("delta_pp", submission.delta_pp)
+    summary_stats.setdefault("current_pp", submission.current_pp)
+    summary_stats.setdefault("potential_pp", submission.potential_pp)
+
+    return summary_stats
+
+
+async def _fetch_user_stats(submission: SubmissionModel) -> Optional[CurrentUserStats]:
+    try:
+        user_identifier = submission.user.osu_user_id if submission.user else submission.username
+        user_data = await get_public_user_data(user_identifier, mode="osu")
+        return CurrentUserStats(
+            current_pp=user_data["statistics"]["pp"],
+            current_global_rank=user_data["statistics"]["global_rank"],
+            current_country_rank=user_data["statistics"]["country_rank"],
+            username=user_data["username"],
+            avatar_url=user_data["avatar_url"],
+            country_code=user_data["country_code"],
+        )
+    except Exception as exc:
+        logger.error("Failed to fetch live user data for %s: %s", submission.username, exc)
+        return None

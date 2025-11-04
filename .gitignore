@@ -54,11 +54,7 @@ venv.bak
 *.db-journal
 
 storage/*
-!storage/submissions/
-storage/submissions/*
-!storage/submissions/*/
-storage/submissions/*/*
-!storage/submissions/*/analysis_results.json
+!storage/.gitkeep
 
 log/
 logs/
